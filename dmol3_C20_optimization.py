@@ -1,22 +1,23 @@
 """
-DMol3 Structure Optimization for C20 and MC19 (M = Be, Mg, Ca)
-Based on: "Alkaline earth metal substitutional doped C20: a density functional study"
+Structure optimization for C20 and alkaline earth metal doped C20 (MC19)
+Methodology: DFT with PBE functional, DNP basis set (DMol3), spin-polarized calculations
 
-This script uses ASE's DMol3 calculator to run DFT calculations with:
-- Functional: PBE
-- Basis set: DNP
-- Spin-polarized: unrestricted
-- Convergence: 1e-6 Ha for energy, 0.01 eV/A for forces
+This script:
+1. Builds C20 (Ih symmetry) and MC19 (M = Be, Mg, Ca) structures
+2. Performs DMol3 geometry optimization
+3. Extracts bond lengths, angles, and energies
 """
 
 from ase.build import molecule
 from ase.calculators.dmol import DMol3
 from ase.optimize import BFGS
-from ase.io import write
+from ase.io import read, write
 import numpy as np
+import json
+import os
 
 # ============================================================================
-# 1. BUILD C20 FULLERENE STRUCTURE
+# 1. STRUCTURE GENERATION
 # ============================================================================
 
 def build_c20():
@@ -64,14 +65,16 @@ def setup_dmol3_calculator():
     Configure DMol3 calculator with parameters matching the paper.
     """
     calc = DMol3(
-        functional='pbe',                    # PBE functional [citation:6][citation:8]
-        basis='dnp',                         # DNP basis set (equivalent to 6-31G**) [citation:6][citation:8]
+        functional='pbe',                    # PBE functional
+        basis='dnp',                         # DNP basis set
         symmetry='auto',                     # Auto symmetry detection
-        spin_polarization='unrestricted',    # Spin-polarized calculations [citation:6][citation:8]
+        spin_polarization='unrestricted',    # Spin-polarized calculations
         charge=0,                            # Neutral system
         scf_density_convergence=1.0e-6,      # SCF convergence: 1e-6 Hartree
-        # Additional convergence settings for geometry optimization
-        # Note: ASE's DMol3 calculator supports energy and forces [citation:6]
+        # DMol3 specific settings
+        smearing=0.005,                      # Thermal smearing for SCF stability
+        occupation='thermal',                # Thermal occupation
+        cutoff=4.5,                          # Real-space cutoff (Angstrom)
     )
     return calc
 
@@ -88,9 +91,14 @@ def optimize_structure(atoms, dopant_symbol, max_steps=200):
     calc = setup_dmol3_calculator()
     atoms.calc = calc
     
+    print(f"Starting geometry optimization for {dopant_symbol}C19...")
+    
     # Run optimization
     opt = BFGS(atoms, trajectory=f'{dopant_symbol}C19.traj', logfile=f'{dopant_symbol}C19.log')
-    opt.run(fmax=0.01, steps=max_steps)  # 0.01 eV/A force convergence [citation:6]
+    opt.run(fmax=0.01, steps=max_steps)  # 0.01 eV/A force convergence
+    
+    # Save final structure
+    write(f'{dopant_symbol}C19_optimized.xyz', atoms)
     
     return atoms
 
@@ -98,27 +106,34 @@ def optimize_structure(atoms, dopant_symbol, max_steps=200):
 # 4. PROPERTY EXTRACTION
 # ============================================================================
 
-def extract_properties(atoms, dopant_symbol, metal_index=0):
+def extract_bond_lengths(atoms, metal_index=0):
     """
-    Extract bond lengths, bond angles, and energy from optimized structure.
+    Extract M-C bond lengths from optimized structure.
     """
     positions = atoms.get_positions()
-    symbols = atoms.get_chemical_symbols()
-    
-    # M-C bond lengths
     metal_pos = positions[metal_index]
+    
     bond_lengths = []
     for i, pos in enumerate(positions):
         if i != metal_index:
             dist = np.linalg.norm(pos - metal_pos)
             bond_lengths.append(dist)
     
-    # C-M-C bond angles
+    return bond_lengths
+
+def extract_bond_angles(atoms, metal_index=0):
+    """
+    Extract C-M-C bond angles from optimized structure.
+    """
+    positions = atoms.get_positions()
+    metal_pos = positions[metal_index]
+    n_atoms = len(positions)
+    
     angles = []
-    for i in range(len(positions)):
+    for i in range(n_atoms):
         if i == metal_index:
             continue
-        for j in range(i+1, len(positions)):
+        for j in range(i+1, n_atoms):
             if j == metal_index:
                 continue
             vec1 = positions[i] - metal_pos
@@ -127,72 +142,212 @@ def extract_properties(atoms, dopant_symbol, metal_index=0):
             angle = np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
             angles.append(angle)
     
+    return angles
+
+def extract_bond_lengths_cc(atoms):
+    """
+    Extract C-C bond lengths from optimized structure (for pure C20).
+    """
+    positions = atoms.get_positions()
+    symbols = atoms.get_chemical_symbols()
+    
+    bond_lengths = []
+    for i in range(len(positions)):
+        for j in range(i+1, len(positions)):
+            if symbols[i] == 'C' and symbols[j] == 'C':
+                dist = np.linalg.norm(positions[i] - positions[j])
+                bond_lengths.append(dist)
+    
+    return bond_lengths
+
+def extract_properties(atoms, dopant_symbol, metal_index=0):
+    """
+    Extract all properties from optimized structure.
+    """
     # Energy
     energy = atoms.get_potential_energy()
     
+    # For pure C20
+    if dopant_symbol == 'C':
+        bond_lengths = extract_bond_lengths_cc(atoms)
+        return {
+            'symbol': 'C20',
+            'energy': energy,
+            'bond_lengths': bond_lengths,
+            'avg_bond_length': np.mean(bond_lengths),
+            'std_bond_length': np.std(bond_lengths),
+        }
+    
+    # For doped structures
+    bond_lengths = extract_bond_lengths(atoms, metal_index)
+    bond_angles = extract_bond_angles(atoms, metal_index)
+    
     return {
-        'symbol': dopant_symbol,
+        'symbol': f'{dopant_symbol}C19',
         'energy': energy,
         'bond_lengths': bond_lengths,
-        'bond_angles': angles,
+        'bond_angles': bond_angles,
         'avg_bond_length': np.mean(bond_lengths),
-        'avg_bond_angle': np.mean(angles),
+        'std_bond_length': np.std(bond_lengths),
+        'avg_bond_angle': np.mean(bond_angles),
+        'std_bond_angle': np.std(bond_angles),
+        'min_bond_length': np.min(bond_lengths),
+        'max_bond_length': np.max(bond_lengths),
+        'min_bond_angle': np.min(bond_angles),
+        'max_bond_angle': np.max(bond_angles),
     }
 
 # ============================================================================
-# 5. MAIN WORKFLOW
+# 5. SPIN MULTIPLICITY SCREENING
+# ============================================================================
+
+def screen_spin_multiplicity(atoms, dopant_symbol):
+    """
+    Screen different spin multiplicities as per paper Table 1.
+    Returns energy for singlet, doublet, triplet, etc.
+    """
+    # Multiplicities to test: 1(singlet), 2(doublet), 3(triplet), etc.
+    multiplicities = [1, 2, 3, 4, 5, 6, 7]
+    results = {}
+    
+    for mult in multiplicities:
+        print(f"Testing multiplicity {mult} for {dopant_symbol}C19...")
+        
+        # Create calculator with specific spin multiplicity
+        calc = DMol3(
+            functional='pbe',
+            basis='dnp',
+            symmetry='auto',
+            spin_polarization='unrestricted' if mult > 1 else 'restricted',
+            charge=0,
+            multiplicity=mult,
+            scf_density_convergence=1.0e-6,
+            smearing=0.005,
+            occupation='thermal',
+            cutoff=4.5,
+        )
+        
+        atoms_copy = atoms.copy()
+        atoms_copy.calc = calc
+        
+        try:
+            energy = atoms_copy.get_potential_energy()
+            results[mult] = energy
+            print(f"  Multiplicity {mult}: Energy = {energy:.6f} Ha")
+        except Exception as e:
+            print(f"  Multiplicity {mult}: Failed - {str(e)}")
+            results[mult] = None
+    
+    return results
+
+# ============================================================================
+# 6. MAIN WORKFLOW
 # ============================================================================
 
 def main():
-    # Build C20
-    print("Building C20 fullerene...")
-    c20 = build_c20()
-    print(f"C20 has {len(c20)} atoms")
+    """
+    Main workflow for DMol3 optimization of C20 and MC19 structures.
+    """
+    # Create output directory
+    os.makedirs('dmol3_output', exist_ok=True)
+    os.chdir('dmol3_output')
     
-    # Dopants from the paper
+    # Step 1: Build C20
+    print("="*60)
+    print("GENERATING C20 FULLERENE STRUCTURE")
+    print("="*60)
+    c20 = build_c20()
+    print(f"C20 created with {len(c20)} atoms")
+    write('C20_initial.xyz', c20)
+    
+    # Step 2: Optimize pure C20
+    print("\n" + "="*60)
+    print("OPTIMIZING PURE C20")
+    print("="*60)
+    opt_c20 = optimize_structure(c20, 'C')
+    
+    # Extract C20 properties
+    c20_props = extract_properties(opt_c20, 'C')
+    print(f"\nC20 Results:")
+    print(f"  Energy: {c20_props['energy']:.6f} Ha")
+    print(f"  Avg C-C bond length: {c20_props['avg_bond_length']:.4f} Å")
+    print(f"  Std C-C bond length: {c20_props['std_bond_length']:.4f} Å")
+    
+    # Step 3: Dopants
     dopants = ['Be', 'Mg', 'Ca']
-    results = {}
+    results = {'C20': c20_props}
     
     for dopant in dopants:
-        print(f"\n{'='*50}")
-        print(f"Optimizing {dopant}C19...")
-        print(f"{'='*50}")
+        print("\n" + "="*60)
+        print(f"OPTIMIZING {dopant}C19")
+        print("="*60)
         
         # Substitute dopant
         mc19 = substitute_dopant(c20.copy(), dopant)
+        write(f'{dopant}C19_initial.xyz', mc19)
         
-        # Optimize
-        opt_atoms = optimize_structure(mc19, dopant)
+        # Screen spin multiplicities (Table 1 in paper)
+        print(f"\nScreening spin multiplicities for {dopant}C19...")
+        spin_results = screen_spin_multiplicity(mc19, dopant)
+        
+        # Find lowest energy multiplicity
+        valid_results = {k: v for k, v in spin_results.items() if v is not None}
+        if valid_results:
+            lowest_mult = min(valid_results, key=valid_results.get)
+            print(f"\nLowest energy multiplicity: {lowest_mult} (Singlet)" 
+                  if lowest_mult == 1 else f"Lowest energy multiplicity: {lowest_mult}")
+        
+        # Optimize with singlet multiplicity (as per paper)
+        print(f"\nPerforming full optimization for {dopant}C19 with singlet multiplicity...")
+        opt_mc19 = optimize_structure(mc19, dopant)
         
         # Extract properties
-        props = extract_properties(opt_atoms, dopant)
-        results[dopant] = props
-        
-        # Save structure
-        write(f'{dopant}C19.xyz', opt_atoms)
+        props = extract_properties(opt_mc19, dopant)
+        results[f'{dopant}C19'] = props
         
         print(f"\n{dopant}C19 Results:")
         print(f"  Energy: {props['energy']:.6f} Ha")
-        print(f"  Avg M-C bond length: {props['avg_bond_length']:.3f} Å")
-        print(f"  Avg C-M-C angle: {props['avg_bond_angle']:.3f}°")
+        print(f"  Avg M-C bond length: {props['avg_bond_length']:.4f} Å")
+        print(f"  Std M-C bond length: {props['std_bond_length']:.4f} Å")
+        print(f"  Avg C-M-C angle: {props['avg_bond_angle']:.4f}°")
+        print(f"  Std C-M-C angle: {props['std_bond_angle']:.4f}°")
+        print(f"  Min/Max M-C bond: {props['min_bond_length']:.4f} / {props['max_bond_length']:.4f} Å")
+        print(f"  Min/Max C-M-C angle: {props['min_bond_angle']:.4f} / {props['max_bond_angle']:.4f}°")
     
-    # Compare with paper Table 2
-    print("\n" + "="*50)
-    print("Comparison with Paper (Table 2):")
-    print("="*50)
-    for dopant, props in results.items():
-        print(f"\n{dopant}C19:")
-        print(f"  M-C bond length: {props['avg_bond_length']:.3f} Å")
-        print(f"  C-M-C angle: {props['avg_bond_angle']:.3f}°")
-        
-        # Paper values for reference
-        paper_values = {
-            'Be': {'bond': 1.75, 'angle': 42.607},
-            'Mg': {'bond': 2.12, 'angle': 49.657},
-            'Ca': {'bond': 2.39, 'angle': 55.492},
-        }
-        if dopant in paper_values:
-            print(f"  Paper values: bond={paper_values[dopant]['bond']} Å, angle={paper_values[dopant]['angle']}°")
+    # Step 4: Save all results
+    print("\n" + "="*60)
+    print("SAVING RESULTS")
+    print("="*60)
+    
+    # Convert numpy arrays to lists for JSON serialization
+    results_serializable = {}
+    for key, value in results.items():
+        results_serializable[key] = {}
+        for k, v in value.items():
+            if isinstance(v, np.ndarray):
+                results_serializable[key][k] = v.tolist()
+            elif isinstance(v, np.float64) or isinstance(v, np.float32):
+                results_serializable[key][k] = float(v)
+            else:
+                results_serializable[key][k] = v
+    
+    with open('optimization_results.json', 'w') as f:
+        json.dump(results_serializable, f, indent=2)
+    
+    print("Results saved to optimization_results.json")
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
+    print(f"Structure          Energy (Ha)    Avg Bond (Å)    Avg Angle (°)")
+    print("-"*60)
+    for key, value in results.items():
+        if key == 'C20':
+            print(f"{key:15} {value['energy']:12.6f}   {value['avg_bond_length']:10.4f}       -")
+        else:
+            print(f"{key:15} {value['energy']:12.6f}   {value['avg_bond_length']:10.4f}   {value['avg_bond_angle']:10.4f}")
+    
+    print("="*60)
+    print("Optimization complete!")
 
 if __name__ == "__main__":
     main()
